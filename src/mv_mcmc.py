@@ -40,7 +40,7 @@ def blind_swim(t_start, dt, lon_start, lat_start, speed=1.0, max_t=3.0):
     viable_trajectories = []
     viable_times = []
 
-    # Sweep over constant headings
+    # Sweep over constant southbound headings
     for heading in range(90, 280, 5):
         current_loc = (lon_start, lat_start)
         trajectory = [current_loc]
@@ -121,55 +121,6 @@ def blind_swim(t_start, dt, lon_start, lat_start, speed=1.0, max_t=3.0):
     return headings
 
 
-def greedy_swim(t_start, dt, lon_start, lat_start, speed=1.0, max_t=3.0):
-    # Designed to greedily pursue the closest point on land, at each timestep.
-    loc = np.array([lon_start, lat_start])
-    t = t_start
-    
-    # Store first point and bearing
-    time = [t]
-    headings = []
-    traj = [loc]
-    
-    xct = 0
-    
-    while  (xct < 1) and (t-t_start <= max_t):
-        # Determine direct bearing to land
-        dist_to_shore, bearing_to_shore = gt.closest_appropach_to_region(loc, mv_shoreline)
-        
-        if bearing_to_shore is None:
-            headings.append(headings[-1])
-        else:
-            headings.append(np.radians(bearing_to_shore))
-        
-        # Compute velocity over ground at present location
-        flow = flowfield(loc[0], loc[1], t)
-        swim = speed * np.array([np.sin(headings[-1]), np.cos(headings[-1])])
-        vog = flow + swim
-        
-        # Compute the distance over ground covered in one time step
-        cog = np.degrees(np.mod(np.pi/2 - np.atan2(np.radians(vog[1]), np.radians(vog[0])), 2*np.pi))
-        sog = np.sqrt(np.dot(vog, vog))
-        dist = sog*dt*3600
-        
-        # Compute new position after timestep, increment time
-        loc = gt.reckon(loc, cog, dist)
-        t += dt
-        
-        # Store variables
-        time.append(t)
-        traj.append(loc)
-        
-        xct = np.sum(gt.is_point_in_region(traj, mv_shoreline))
-    
-    print("Land ho!")
-    print("Crossing Count: ", xct)
-    print("shape(time): ", np.shape(time))
-    print("shape(traj): ", np.shape(traj))
-    print("shape(headings): ", np.shape(headings))
-    return np.degrees(headings)
-
-
 def simulate_swim(t_start, dt, lon_start, lat_start, headings, speed=1.0):
     # Compute the trajectory of a swim defined by:
     #   - a start time, specified in hours from the beginning of the dataset
@@ -211,10 +162,22 @@ def simulate_swim(t_start, dt, lon_start, lat_start, headings, speed=1.0):
 
     total_time = (t-t_start)*3600
     
-    dist_to_shore, bearing_to_shore = gt.closest_appropach_to_region(loc, mv_shoreline)
-    
-    return total_time, traj, dist_to_shore, bearing_to_shore
+    return total_time, traj
 
+
+def cost_fn(headings):
+    # Wrapper for swim time; helpful when defining a more complex cost function.
+    total_time, traj = simulate_swim(t_start, dt, lon_start, lat_start, headings, swim_speed_ms)
+    
+    ## Option: penalize jagged trajectories
+    # dlon = np.diff(traj[:,0], n=2, axis=0)
+    # dlat = np.diff(traj[:,1], n=2, axis=0)
+    # smoothness = np.sum(dlon**2 + dlat**2)
+    
+    cost = total_time
+    return cost
+        
+        
 
 # =============================================================================
 # RJMCMC Proposal: Birth, Death, and Modify Moves
@@ -240,7 +203,7 @@ def generate_bump(headings, bump_size=1.0):
     return bump
 
 
-def propose_rjmcmc(headings, traj, birth_bearing, bump_size=1.0):
+def propose_rjmcmc(headings, bump_size=1.0):
     """
     Proposes a new candidate for the heading sequence h using RJMCMC moves.
     Moves include:
@@ -248,6 +211,7 @@ def propose_rjmcmc(headings, traj, birth_bearing, bump_size=1.0):
       - 'birth': Add a new heading (increases dimension)
       - 'death': Remove a heading (decreases dimension)
     """
+    birth_bearing = float(initial_h[0])
     new_h = headings.copy()
     pb = 0.33
     pd = 0.33
@@ -261,7 +225,7 @@ def propose_rjmcmc(headings, traj, birth_bearing, bump_size=1.0):
         move_info = {'type': 'modify'}
     
     elif move_type == 'birth':
-        new_heading = np.random.normal(float(birth_bearing), 20.0)
+        new_heading = np.random.normal(birth_bearing, 20.0)
         insert_idx = len(new_h)
         new_h = np.insert(new_h, insert_idx, new_heading)
         move_info = {'type': 'birth', 'insert_idx': insert_idx, 'new_heading': new_heading}
@@ -298,55 +262,91 @@ def rjmcmc_optimize(initial_h, iterations=1000, temperature=1.0):
     and a Jacobian of 1 for the birth and death moves.
     In a rigorous application, you would calculate the proposal ratios explicitly.
     """
-    # Simulate swim, based on heading vector
-    total_time, traj, dist_to_shore, bearing_to_shore = simulate_swim(t_start,
-                                                                      dt,
-                                                                      lon_start,
-                                                                      lat_start,
-                                                                      initial_h,
-                                                                      swim_speed_ms)
-    current_h = initial_h
-    current_cost = total_time
+    
+    # Ensure no overshoot in initial solution
+    total_time, traj = simulate_swim(t_start, dt, lon_start, lat_start, initial_h, swim_speed_ms)
+    chop_idx = np.where(gt.is_point_in_region(traj, mv_shoreline))[0]
+    if chop_idx.size > 0:
+        first_index = chop_idx[0]
+        # Keep entries up to and including the condition-met element
+        current_h = initial_h[:first_index+1]
+        traj = traj[:first_index+1,:]
+    else:
+        current_h = initial_h
+            
+    current_cost = cost_fn(current_h)
     best_h = current_h
     best_cost = current_cost
-    bump_size = 1.0
+    
+    bump_size = 5.0
+    
+    init_temp = temperature
+    final_temp = 1
+    
+    accepted_moves = 0
+    total_moves = 0
+    
+    #to plot convergence lines
+    #saved_traj = []
+    #saved_time = []
     
     for i in range(iterations):
-        candidate_h, move_info = propose_rjmcmc(current_h, traj, initial_h[0], bump_size)
-        #print(move_info)
-        # Simulate swim, based on heading vector
-        total_time, traj, dist_to_shore, bearing_to_shore = simulate_swim(t_start,
-                                                                          dt,
-                                                                          lon_start,
-                                                                          lat_start,
-                                                                          candidate_h,
-                                                                          swim_speed_ms)
-        candidate_cost = total_time
+        # Cool bump size exponentially
+        bump_size *= 0.999
+        
+        candidate_h, move_info = propose_rjmcmc(current_h, bump_size)
+        total_time, traj = simulate_swim(t_start, dt, lon_start, lat_start, candidate_h, swim_speed_ms)
+        candidate_cost = cost_fn(candidate_h)
         delta = candidate_cost - current_cost
         
         # For RJMCMC, compute the proposal ratio q(current -> candidate) / q(candidate -> current)
         # We assume symmetric proposals, so proposal_ratio = 1.
         proposal_ratio = 1.0
         
-        # Teperature cools linearly with each iteration
-        acceptance_prob = np.exp(-delta / (temperature*(iterations-i+10)/iterations)) * proposal_ratio
-        #acceptance_prob = np.exp(-delta / temperature) * proposal_ratio
+        # Compute acceptance probability w/ linear cooling
+        temperature -= (init_temp - final_temp)/iterations
+        acceptance_prob = min(1.0, np.exp(-delta / temperature) * proposal_ratio)
         
         if (delta < 0 or np.random.rand() < acceptance_prob) and gt.is_point_in_region(traj[-1,:], mv_shoreline):
             current_h = candidate_h
             current_cost = candidate_cost
+            accepted_moves += 1
+            
             if candidate_cost < best_cost:
                 best_h = candidate_h
                 best_cost = candidate_cost
         
+        total_moves += 1
+        
         if (i % 100 == 0):
-            total_time, traj, dist_to_shore, bearing_to_shore = simulate_swim(t_start, dt, lon_start, lat_start, best_h, swim_speed_ms)
+            #saved_traj.append(traj)
+            #saved_time.append(total_time)
+            total_time, traj = simulate_swim(t_start, dt, lon_start, lat_start, best_h, swim_speed_ms)
             dist_to_shore, bearing_to_shore = gt.closest_appropach_to_region(traj[-1,:], mv_shoreline)
-            #ax.plot(traj[:,0], traj[:,1])
-            print(f"Iteration {i}: Current Cost = {current_cost:.3f}, Best Cost = {best_cost:.3f}")
+            print(f"Iteration {i}: Current Cost = {current_cost:.1f}, Best Cost = {best_cost:.1f}")
             print(f"Dist to shore = {dist_to_shore:.1f}")
             print(f"Total time (min) = {total_time/60:.2f}")
-            
+            print(f"Avg. Acceptance Probability (Temp) = {100*accepted_moves/total_moves:.2f}% ({temperature:.1f})")
+            print(f"Bump Size = +/- {bump_size:.1f} degrees")
+            accepted_moves = 0
+            total_moves = 0
+    
+    # Plot candidate 'constant heading' trajectories
+    #num_lines = len(saved_traj)
+    #norm = mcolors.PowerNorm(gamma=0.7, vmin=np.min(saved_time), vmax=np.max(saved_time))
+    #for i in range(num_lines):
+    #    traj = np.asarray(saved_traj[i])
+    #    time = np.asarray(saved_time[i])
+    #    c = plt.cm.bone_r(norm(time))
+    #    ax.plot(traj[:,0], traj[:,1], color=c, linewidth=0.5)
+    
+    # Create a ScalarMappable with the same colormap and normalization for the colorbar
+    #sm = plt.cm.ScalarMappable(cmap=plt.cm.bone_r, norm=norm)
+    #sm.set_array([])  # Dummy array needed for ScalarMappable
+    
+    # Add the colorbar to the plot
+    #cbar = plt.colorbar(sm, ax=ax)
+    #cbar.set_label('Swim Time [min]')
     return best_h, best_cost
 
 
@@ -426,7 +426,7 @@ lat_start = waypts[0,1]
 print("START: ", datetime_start, " ( t=", t_start, "hrs )")
 print("Searching for a reasonable first solution...")
 initial_h = blind_swim(t_start, dt, lon_start, lat_start, swim_speed_ms, max_t=3.0)
-#initial_h = np.full(int(2/dt), 140.0)
+#initial_h = np.full(int(3/dt), 180.0)
 #initial_h = np.random.uniform(0, 359.9, size=int(2/dt))
 #initial_h = np.array([140.0])
 
@@ -434,12 +434,13 @@ initial_h = blind_swim(t_start, dt, lon_start, lat_start, swim_speed_ms, max_t=3
 # MAIN EXECUTION: Run RJMCMC Optimization
 # =============================================================================
 if __name__ == '__main__':
-    optimized_h, optimized_cost = rjmcmc_optimize(initial_h, iterations=1000, temperature=10.0)
-    optimized_swim_time, optimized_swim_traj, dist_to_shore, bearing_to_shore  = simulate_swim(t_start, dt, lon_start, lat_start, optimized_h, swim_speed_ms)
+    optimized_h, optimized_cost = rjmcmc_optimize(initial_h, iterations=2000, temperature=15.0)
+    optimized_swim_time, optimized_swim_traj = simulate_swim(t_start, dt, lon_start, lat_start, optimized_h, swim_speed_ms)
     optimized_swim_time /= 60
     optimized_swim_dist = np.sum(gt.haversine_distance(optimized_swim_traj[0:-2,:], optimized_swim_traj[1:-1,:]))
     print("\nOptimized Headings:")
-    print(optimized_h)
+    print(np.round(optimized_h, decimals=2))
+    print()
     print(f"\nOptimized Total Transit Time: {optimized_swim_time:.3f}")
     
     ax.plot(optimized_swim_traj[:,0], optimized_swim_traj[:,1], color='gold', linewidth=1.0)
@@ -458,6 +459,7 @@ if __name__ == '__main__':
             boxstyle='round,pad=0.2'  # Rounded box style, with some padding
         )
     )
+    plt.tight_layout()
     plt.show()
         
     # save data

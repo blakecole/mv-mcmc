@@ -79,6 +79,3 @@ print("Creating figure animation...")
 ani = animation.FuncAnimation(fig, update, frames=np.size(t), interval=100, blit=False)
 
 ani.save("../fig/mv_tides.gif", writer="pillow", fps=10)
-#ani.save("../fig/mv_tides.mp4", writer="ffmpeg", fps=10)
-
-#plt.show()
