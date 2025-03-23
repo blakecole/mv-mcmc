@@ -219,7 +219,7 @@ def reckon(p, bearing, distance):
     """
     Vectorized destination point calculation.
     
-    Given a starting point p (lon, lat) in degrees, bearing (radians) and a distance in meters,
+    Given a starting point p (lon, lat) in degrees, bearing (degrees) and a distance in meters,
     compute the destination point(s) along a great-circle.
     
     Parameters:

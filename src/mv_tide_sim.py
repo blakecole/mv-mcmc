@@ -32,14 +32,10 @@ t = np.squeeze(data['thours'])
 lat = np.squeeze(data['lat'])
 lon = np.squeeze(data['lon'])
 waypts = data['waypts']
+print("Success.\n")
 
 n_points = np.size(lon) # number of spatial points
 n_frames = np.size(t)   # number of timesteps
-
-print("Success.\n")
-
-# Set up title strings
-
 
 # Configure Pyplot
 plt.style.use('dark_background')

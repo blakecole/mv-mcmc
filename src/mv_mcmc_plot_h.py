@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Mar 20 19:00:58 2025
+# ********************************************************** #
+#    NAME: Blake Cole                                        #
+#    ORGN: (self)                                            #
+#    FILE: mv_mcmc_plot_h.py                                 #
+#    DATE: 20 MAR 2025                                       #
+# ********************************************************** #
 
-@author: bicole
-"""
+# PURPOSE: Plot optimized heading sequences vs. time for each start time
 
 import numpy as np
 import matplotlib.pyplot as plt

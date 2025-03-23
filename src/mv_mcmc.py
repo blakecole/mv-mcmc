@@ -1,7 +1,7 @@
 # ********************************************************** #
 #    NAME: Blake Cole                                        #
 #    ORGN: (self)                                            #
-#    FILE: mv-mcmc.py                                        #
+#    FILE: mv_mcmc.py                                        #
 #    DATE: 28 FEB 2025                                       #
 # ********************************************************** #
 
@@ -14,12 +14,13 @@ import geotools as gt
 
 
 # =============================================================================
-# RJMCMC Cost Function Definition
+# Swim Simulation
+# =============================================================================
 def blind_swim(t_start, dt, lon_start, lat_start, speed=1.0, max_t=3.0):
     """
     Simulate a trajectory through a vector field for a constant heading.
-    It tests headings from 90° to 275° (step 5°) and selects the one that reaches at 
-    least two shoreline points in the minimum elapsed time.
+    It tests headings from 90° to 275° (step 5°) and selects the one that reaches
+    the shoreline in the minimum elapsed time.
 
     Parameters:
         t_start (float): Initial time (in hours).
@@ -53,7 +54,7 @@ def blind_swim(t_start, dt, lon_start, lat_start, speed=1.0, max_t=3.0):
         heading_rad = np.radians(heading)
         swim_velocity = speed * np.array([np.sin(heading_rad), np.cos(heading_rad)])
         
-        # Continue simulation until we have at least two shoreline hits.
+        # Continue simulation until we have at least one shoreline hits.
         while shore_hits < 2:
             steps += 1
             
@@ -165,6 +166,9 @@ def simulate_swim(t_start, dt, lon_start, lat_start, headings, speed=1.0):
     return total_time, traj
 
 
+# =============================================================================
+# Cost Function
+# =============================================================================
 def cost_fn(headings):
     # Wrapper for swim time; helpful when defining a more complex cost function.
     total_time, traj = simulate_swim(t_start, dt, lon_start, lat_start, headings, swim_speed_ms)
@@ -178,7 +182,6 @@ def cost_fn(headings):
     return cost
         
         
-
 # =============================================================================
 # RJMCMC Proposal: Birth, Death, and Modify Moves
 # =============================================================================
@@ -404,37 +407,40 @@ ax.set_xlabel("Longitude [deg]")
 ax.set_ylabel("Latitude [deg]")
 
 
-# Define swim start time and timestep
-dt = 0.005
-datetime_start = datetime.strptime("2022-Jul-30 06:30", "%Y-%b-%d %H:%M")
-def hours_since_start(t_local_dt):
-    return (t_local_dt - t_local[0]).total_seconds() / 3600
-x = np.array([hours_since_start(date_time) for date_time in t_local])
-target_x = hours_since_start(datetime_start)
-t_start =  np.round(np.interp(target_x, x, t), decimals=2)
-datetime_start_str = datetime_start.strftime("%Y-%b-%d %H:%M")
-
-ax.set_title("Vineyard Sound Swim Optimization" + "\n" + datetime_start_str)
-
-# Define static user parameters
-swim_pace = 1.667                                           #[1:40 min/100yd]
-swim_speed_ms = 1/((swim_pace/100)*1760*(1/1609.34)*60)     #[m/s]
-lon_start = waypts[0,0]
-lat_start = waypts[0,1]
-
-# Initial heading sequence: start with 10 random headings (in degrees)
-print("START: ", datetime_start, " ( t=", t_start, "hrs )")
-print("Searching for a reasonable first solution...")
-initial_h = blind_swim(t_start, dt, lon_start, lat_start, swim_speed_ms, max_t=3.0)
-#initial_h = np.full(int(3/dt), 180.0)
-#initial_h = np.random.uniform(0, 359.9, size=int(2/dt))
-#initial_h = np.array([140.0])
-
 # =============================================================================
 # MAIN EXECUTION: Run RJMCMC Optimization
 # =============================================================================
 if __name__ == '__main__':
-    optimized_h, optimized_cost = rjmcmc_optimize(initial_h, iterations=2000, temperature=15.0)
+    # Swim parameters
+    swim_pace = 1.667                                           #[1:40 min/100yd]
+    swim_speed_ms = 1/((swim_pace/100)*1760*(1/1609.34)*60)     #[m/s]
+    lon_start = waypts[0,0]
+    lat_start = waypts[0,1]
+    dt = 0.005
+    datetime_start = datetime.strptime("2022-Jul-30 06:30", "%Y-%b-%d %H:%M")
+    
+    # Optimization parameters
+    iterations = 2000
+    temperature = 15.0
+    
+    # Convert start time to 'datetime' object
+    def hours_since_start(t_local_dt):
+        return (t_local_dt - t_local[0]).total_seconds() / 3600
+    x = np.array([hours_since_start(date_time) for date_time in t_local])
+    target_x = hours_since_start(datetime_start)
+    t_start =  np.round(np.interp(target_x, x, t), decimals=2)
+    datetime_start_str = datetime_start.strftime("%Y-%b-%d %H:%M")
+
+        
+    # OPTIMIZE!
+    # Search for a decent (constant-heading) first guess
+    print("START: ", datetime_start, " ( t=", t_start, "hrs )")
+    print("Searching for a reasonable first solution...")
+    initial_h = blind_swim(t_start, dt, lon_start, lat_start, swim_speed_ms, max_t=3.0)
+    #initial_h = np.full(int(3/dt), 180.0)
+    
+    # RJ-MCMC optimization routine
+    optimized_h, optimized_cost = rjmcmc_optimize(initial_h, iterations, temperature)
     optimized_swim_time, optimized_swim_traj = simulate_swim(t_start, dt, lon_start, lat_start, optimized_h, swim_speed_ms)
     optimized_swim_time /= 60
     optimized_swim_dist = np.sum(gt.haversine_distance(optimized_swim_traj[0:-2,:], optimized_swim_traj[1:-1,:]))
@@ -443,8 +449,12 @@ if __name__ == '__main__':
     print()
     print(f"\nOptimized Total Transit Time: {optimized_swim_time:.3f}")
     
+    
+    # PLOT!
+    ax.set_title("Vineyard Sound Swim Optimization" + "\n" + datetime_start_str)
     ax.plot(optimized_swim_traj[:,0], optimized_swim_traj[:,1], color='gold', linewidth=1.0)
-    # Add optimal swim time in gold at Axes coordinates (0.5, 0.5)
+    
+    # Print optimal swim stats in upper righthand corner.
     ax.text(
         0.76, 0.91,
         f'{optimized_swim_time:.1f} min\n{optimized_swim_dist:.0f} m',
@@ -462,7 +472,8 @@ if __name__ == '__main__':
     plt.tight_layout()
     plt.show()
         
-    # save data
+    
+    # SAVE!
     save_choice = input("Would you like to save the data? (y/n): ")
     if save_choice.lower().startswith('y'):
         fname_out = "mv_swim_heading_" + datetime_start.strftime("%H%M")+ ".csv"
